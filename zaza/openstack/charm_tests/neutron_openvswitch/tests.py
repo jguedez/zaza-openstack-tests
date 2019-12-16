@@ -21,7 +21,91 @@ import logging
 import unittest
 
 import zaza
+import zaza.model as model
 import zaza.openstack.utilities.openstack as openstack_utils
+import zaza.openstack.charm_tests.test_utils as test_utils
+
+
+class NeutronOpenvSwitchTest(test_utils.OpenStackBaseTest):
+    """Test basic Neutron Gateway Charm functionality."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Run class setup for running Neutron Gateway tests."""
+        super(NeutronOpenvSwitchTest, cls).setUpClass()
+        cls.current_os_release = openstack_utils.get_os_release()
+        cls.services = ['neutron-openvswitch-agent']
+
+        bionic_stein = openstack_utils.get_os_release('bionic_stein')
+
+        cls.pgrep_full = (True if cls.current_os_release >= bionic_stein
+                          else False)
+
+        # workaround due to bug in libjuju setting lead_unit to None in
+        # subordinate charms in test_utils.OpenStackBaseTest
+        # https://github.com/juju/python-libjuju/issues/374
+        cls.lead_unit = model.get_first_unit_name(cls.application_name)
+        logging.debug('Leader unit is {}'.format(cls.lead_unit))
+
+    def test_900_restart_on_config_change(self):
+        """Checking restart happens on config change.
+
+        Change debug logging and assert that services are restarted as a result
+        """
+        # Expected default and alternate values
+        current_value = zaza.model.get_application_config(
+            self.application_name)['debug']['value']
+        new_value = str(not bool(current_value)).title()
+        current_value = str(current_value).title()
+
+        set_default = {'debug': current_value}
+        set_alternate = {'debug': new_value}
+        default_entry = {'DEFAULT': {'debug': [current_value]}}
+        alternate_entry = {'DEFAULT': {'debug': [new_value]}}
+
+        # Config file affected by juju set config change
+        conf_file = '/etc/neutron/neutron.conf'
+
+        # Make config change, check for service restarts
+        logging.info(
+            'Setting verbose on {} {}'.format(self.application_name,
+                                              set_alternate))
+        self.restart_on_changed(
+            conf_file,
+            set_default,
+            set_alternate,
+            default_entry,
+            alternate_entry,
+            self.services,
+            pgrep_full=self.pgrep_full)
+
+    def test_910_pause_and_resume(self):
+        """Run pause and resume tests.
+
+        Pause service and check services are stopped then resume and check
+        they are started
+        """
+        # libjuju status for subordinate charms has issues (reports no units)
+        # meaning that the pause_resume support in test_utils.OpenStackBaseTest
+        # does not work properly, the block comment below should be all we need
+        # when this is fixed: https://github.com/juju/python-libjuju/issues/374
+
+        # with self.pause_resume(
+        #         self.services,
+        #         pgrep_full=self.pgrep_full):
+        #     logging.info("Testing pause resume")
+
+        # as a workaround we are checking that we can pause/resume directly
+        unit = model.get_unit_from_name(self.lead_unit)
+        self.assertEqual(unit.workload_status, "active")
+
+        model.run_action(self.lead_unit, "pause")
+        unit = model.get_unit_from_name(self.lead_unit)
+        self.assertEqual(unit.workload_status, "maintenance")
+
+        model.run_action(self.lead_unit, "resume")
+        unit = model.get_unit_from_name(self.lead_unit)
+        self.assertEqual(unit.workload_status, "active")
 
 
 class NeutronOpenvSwitchOverlayTest(unittest.TestCase):
