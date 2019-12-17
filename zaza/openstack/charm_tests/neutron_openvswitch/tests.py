@@ -17,7 +17,9 @@
 """Encapsulating `neutron-openvswitch` testing."""
 
 import json
+import operator
 import logging
+import tenacity
 import unittest
 
 import zaza
@@ -41,11 +43,40 @@ class NeutronOpenvSwitchTest(test_utils.OpenStackBaseTest):
         cls.pgrep_full = (True if cls.current_os_release >= bionic_stein
                           else False)
 
+        # set up clients
+        cls.neutron_client = (
+            openstack_utils.get_neutron_session_client(cls.keystone_session))
+
         # workaround due to bug in libjuju setting lead_unit to None in
         # subordinate charms in test_utils.OpenStackBaseTest
         # https://github.com/juju/python-libjuju/issues/374
         cls.lead_unit = model.get_first_unit_name(cls.application_name)
         logging.debug('Leader unit is {}'.format(cls.lead_unit))
+
+    def test_401_l2pop_propagation(self):
+        """Verify that neutron-api l2pop setting propagates to neutron-ovs"""
+        default_value = True
+        new_value = False
+
+        with self.config_change(
+                {"l2-population": str(default_value)},
+                {"l2-population": str(new_value)},
+                application_name="neutron-api"):
+
+                self._validate_ovs_agent_setting(new_value, "l2_population")
+
+    def test_402_nettype_propagation(self):
+        """Verify that neutron-api nettype setting propagates to neutron-ovs"""
+        default_value = "gre"
+        new_value = "vxlan"
+
+        with self.config_change(
+                {"overlay-network-type": default_value},
+                {"overlay-network-type": new_value},
+                application_name="neutron-api"):
+
+                self._validate_ovs_agent_setting(new_value, "tunnel_types",
+                                                 op=operator.contains)
 
     def test_900_restart_on_config_change(self):
         """Checking restart happens on config change.
@@ -106,6 +137,16 @@ class NeutronOpenvSwitchTest(test_utils.OpenStackBaseTest):
         model.run_action(self.lead_unit, "resume")
         unit = model.get_unit_from_name(self.lead_unit)
         self.assertEqual(unit.workload_status, "active")
+
+    @tenacity.retry(wait=tenacity.wait_exponential(min=5, max=60),
+                    reraise=True, stop=tenacity.stop_after_attempt(8))
+    def _validate_ovs_agent_setting(self, value, setting, op=operator.eq):
+        """Validate that the setting is configured to the provided value"""
+        logging.debug("validating {} => {}".format(setting, value))
+        ovs_agent = self.neutron_client.list_agents(
+            binary='neutron-openvswitch-agent')['agents'][0]
+
+        assert op(ovs_agent['configurations'][setting], value)
 
 
 class NeutronOpenvSwitchOverlayTest(unittest.TestCase):
